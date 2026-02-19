@@ -68,8 +68,8 @@ class GithubService:
             FileUtils.safe_delete_folder(clone_path)
             
             try:
-                # Pass env for SSH
-                git.Repo.clone_from(auth_url, clone_path, env=env)
+                # Pass env for SSH and enable longpaths
+                git.Repo.clone_from(auth_url, clone_path, env=env, config='core.longpaths=true', allow_unsafe_options=True)
             except GitCommandError as e:
                 error_msg = str(e)
                 if token:

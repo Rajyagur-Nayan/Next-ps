@@ -82,9 +82,46 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [status.logs]);
+
+
+  const [vercelToken, setVercelToken] = useState("");
+  const [vercelLogs, setVercelLogs] = useState<{
+    status: string;
+    deployment: any;
+    logs: string[];
+    loading: boolean;
+  } | null>(null);
+
+  const checkVercelDeployment = async (repoUrl: string) => {
+    if (!vercelToken && !repoUrl) return;
+
+    setVercelLogs({
+      status: "loading",
+      deployment: null,
+      logs: [],
+      loading: true,
+    });
+
+    try {
+      const res = await axios.get(`${API_URL}/vercel-logs`, {
+        params: { repo_url: repoUrl, vercel_token: vercelToken },
+      });
+
+      if (res.data.status === "not_found") {
+        setVercelLogs(null); // No deployment, don't show anything
+      } else {
+        setVercelLogs({
+          status: "found",
+          deployment: res.data.deployment,
+          logs: res.data.logs || [],
+          loading: false,
+        });
+      }
+    } catch (e) {
+      console.error("Vercel check failed", e);
+      setVercelLogs(null);
+    }
+  };
 
   const handleRun = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -98,6 +135,9 @@ export default function Dashboard() {
       alert("Please enter a Private Key for SSH mode.");
       return;
     }
+
+    // Check Vercel Deployment in background
+    checkVercelDeployment(formData.repo_url);
 
     try {
       await axios.post(`${API_URL}/start-autonomous-run`, {
@@ -126,7 +166,7 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-4 text-sm text-slate-400">
             <span className="flex items-center gap-1">
-              <Terminal size={14} /> v2.1.0 (SSH Supported)
+              <Terminal size={14} /> v2.2.0 (Vercel Integration)
             </span>
           </div>
         </div>
@@ -268,13 +308,9 @@ export default function Dashboard() {
                       <p className="text-[10px] text-yellow-400/80">
                         SSH Mode Note: PR creation still requires a GitHub
                         Token. Automatic PRs might be skipped if token is not
-                        provided separately (not implemented yet). Brach pushes
-                        will work fine.
+                        provided separately.
                       </p>
-                      {/* Ideally prompt for optional token in SSH mode too, but following strict prompt layout */}
                     </div>
-
-                    {/* Adding Optional Token input for SSH mode PRs as per logical requirement, even if minimal prompt */}
                     <div>
                       <label className="text-xs font-mono text-slate-400 uppercase flex items-center gap-1">
                         <Lock size={10} /> GitHub Token (Optional for PRs)
@@ -295,6 +331,21 @@ export default function Dashboard() {
                     </div>
                   </div>
                 )}
+
+                {/* Vercel Token Input (Optional) */}
+                <div>
+                  <label className="text-xs font-mono text-slate-400 uppercase flex items-center gap-1">
+                    <Zap size={10} /> Vercel Token (Optional)
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm focus:border-orange-500 outline-none"
+                    placeholder="Access Token for Logs..."
+                    value={vercelToken}
+                    onChange={(e) => setVercelToken(e.target.value)}
+                    disabled={isRunning}
+                  />
+                </div>
 
                 <button
                   type="submit"
@@ -431,6 +482,49 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+
+          {/* Vercel Logs (Conditional) */}
+          {vercelLogs &&
+            (vercelLogs.loading || vercelLogs.status === "found") && (
+              <div className="bg-black rounded-xl border border-orange-900/50 shadow-xl overflow-hidden font-mono text-xs mb-6">
+                <div className="p-2 bg-orange-950/20 border-b border-orange-900/50 text-orange-200 flex justify-between items-center px-4">
+                  <div className="flex items-center gap-2">
+                    <Zap size={14} className="text-orange-500" />
+                    <span>VERCEL DEPLOYMENT LOGS</span>
+                    {vercelLogs.loading && (
+                      <Loader2 size={12} className="animate-spin opacity-50" />
+                    )}
+                    {!vercelLogs.loading && vercelLogs.deployment && (
+                      <span className="text-xs px-2 py-0.5 rounded bg-orange-500/20 text-orange-300">
+                        {vercelLogs.deployment.project_name} (
+                        {vercelLogs.deployment.state})
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="h-48 overflow-y-auto p-4 space-y-1 text-slate-300 bg-black/80">
+                  {vercelLogs.loading ? (
+                    <span className="text-slate-500 italic">
+                      Fetching latest deployment logs...
+                    </span>
+                  ) : vercelLogs.logs.length === 0 ? (
+                    <span className="text-slate-500 italic">
+                      No build logs available for this deployment.
+                    </span>
+                  ) : (
+                    vercelLogs.logs.map((log, i) => (
+                      <div
+                        key={i}
+                        className="break-words border-l-2 border-slate-800 pl-2"
+                      >
+                        <span className="text-orange-500/50 mr-2">{">"}</span>
+                        {log}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
 
           {/* Fixes Table */}
           <div className="bg-[#1e293b] rounded-xl border border-slate-700 shadow-xl overflow-hidden">

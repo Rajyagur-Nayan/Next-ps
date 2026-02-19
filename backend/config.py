@@ -6,6 +6,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    VERCEL_TOKEN = os.getenv("VERCEL_TOKEN")
     MAX_RETRIES = 5
     WORKSPACE_DIR = os.path.join(os.getcwd(), "workspace")
     RESULTS_FILE = "results.json"

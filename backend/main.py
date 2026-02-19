@@ -170,3 +170,41 @@ async def start_autonomous_run(req: AutonomousRunRequest):
     thread = threading.Thread(target=run_autonomous_agent, args=(req,))
     thread.start()
     return {"message": "Autonomous Agent Started"}
+
+from backend.services.vercel_service import VercelService
+from backend.config import Config
+
+@app.get("/vercel-logs")
+async def get_vercel_logs(repo_url: str, vercel_token: str = None):
+    token = vercel_token or Config.VERCEL_TOKEN
+    
+    if not token:
+        raise HTTPException(status_code=400, detail="Vercel Token required (env or param)")
+        
+    service = VercelService(token=token)
+    
+    # 1. Find Deployment
+    deploy_res = service.get_latest_deployment(repo_url, token)
+    
+    if deploy_res["status"] == "error":
+         raise HTTPException(status_code=500, detail=deploy_res["message"])
+    if deploy_res["status"] == "not_found":
+         return {"status": "not_found", "message": "No deployment found"}
+         
+    # 2. Get Logs
+    deployment_id = deploy_res["deployment_id"]
+    logs_res = service.get_build_logs(deployment_id, token)
+    
+    if logs_res["status"] == "error":
+         # Return deployment info but with error on logs
+         return {
+             "status": "partial_success", 
+             "deployment": deploy_res, 
+             "logs": ["Failed to fetch logs: " + logs_res["message"]]
+         }
+         
+    return {
+        "status": "success",
+        "deployment": deploy_res,
+        "logs": logs_res["logs"]
+    }

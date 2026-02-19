@@ -1,3 +1,4 @@
+
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Dict
 import os
@@ -14,16 +15,19 @@ class AgentState(TypedDict):
     repo_url: str
     team_name: str
     leader_name: str
-    token: str
+    token: str 
+    auth_mode: str 
+    private_key: str 
     workspace: str
     repo_path: str
     branch_name: str
     iteration: int
     max_iterations: int
-    test_status: str # PASSED / FAILED / ERROR
-    logs: List[str] # Rolling logs
-    fixes_applied: List[Dict] # History of fixes
-    current_error: Dict # Analysis result
+    test_status: str 
+    logs: List[str] 
+    fixes_applied: List[Dict] 
+    current_error: Dict 
+    language_detected: str # NEW FIELD
 
 # Agents
 github_service = GithubService()
@@ -34,12 +38,18 @@ fix_generator = FixGeneratorAgent()
 # Nodes
 
 def clone_node(state: AgentState):
-    # 1. Create Workspace
     workspace = FileUtils.create_workspace()
     state["workspace"] = workspace
     
-    # 2. Clone
-    res = github_service.secure_clone_repo(state["repo_url"], "", state["token"], workspace)
+    res = github_service.secure_clone_repo(
+        state["repo_url"], 
+        "", 
+        state.get("token"), 
+        workspace,
+        auth_mode=state.get("auth_mode", "https"),
+        private_key=state.get("private_key")
+    )
+    
     if res["status"] == "error":
         state["logs"].append(f"Clone Failed: {res['message']}")
         state["test_status"] = "ERROR"
@@ -48,15 +58,19 @@ def clone_node(state: AgentState):
     state["repo_path"] = res["repo_path"]
     state["logs"].append(f"Cloned repository to {state['repo_path']}")
     
-    # 3. Create Branch
     branch = github_service.create_fix_branch(state["repo_path"], state["team_name"], state["leader_name"])
     state["branch_name"] = branch
     state["logs"].append(f"Created branch: {branch}")
     
-    # 4. Push Branch IMMEDIATELY to ensure Docker can see it
-    # We push an empty commit or just the branch ref?
-    # Trying to push the branch as is (pointing to current HEAD).
-    push_res = github_service.commit_and_push(state["repo_path"], None, branch, state["token"]) # Message None = just push
+    push_res = github_service.commit_and_push(
+        state["repo_path"], 
+        None, 
+        branch, 
+        state.get("token"),
+        auth_mode=state.get("auth_mode", "https"),
+        private_key=state.get("private_key")
+    )
+    
     if push_res["status"] == "error":
         state["logs"].append(f"Initial Push Failed: {push_res['message']}")
     else:
@@ -65,55 +79,86 @@ def clone_node(state: AgentState):
     return state
 
 def test_node(state: AgentState):
-    state["logs"].append(f"Running tests (Iteration {state['iteration'] + 1}/{state['max_iterations']})...")
+    state["logs"].append(f"Running Universal Tests (Iteration {state['iteration'] + 1}/{state['max_iterations']})...")
     
-    # Docker Execution
-    # DockerManager will clone from REMOTE. 
-    # Because we pushed in clone_node (and commit_node), remote has latest code.
-    res = test_runner.run_tests(state["repo_url"], state["branch_name"], state["token"])
+    res = test_runner.run_tests(
+        state["repo_url"], 
+        state["branch_name"], 
+        state.get("token"),
+        auth_mode=state.get("auth_mode", "https"),
+        private_key=state.get("private_key")
+    )
+    
+    # Extract language from result if present
+    if "language" in res:
+         state["language_detected"] = res["language"]
+         state["logs"].append(f"Language Detected: {res['language']}")
     
     state["test_status"] = res["status"]
     state["logs"].append(f"Test Result: {res['status']}")
     
     if res["status"] == "FAILED":
-        state["current_error"] = {"raw_logs": res["logs"]}
+        # Check if structured errors exist
+        if "errors" in res and res["errors"]:
+             # Use the first structured error directly?
+             state["current_error"] = res["errors"][0]
+             state["current_error"]["raw_logs"] = res.get("raw_logs", "")
+        else:
+             # Fallback to log analysis
+             state["current_error"] = {"raw_logs": res.get("raw_logs", "")}
         
     return state
 
 def analyze_node(state: AgentState):
-    state["logs"].append("Analyzing failure logs...")
-    # Analyze raw logs
-    logs = state["current_error"].get("raw_logs", "")
+    # If we already have a structured error from Universal Runner, skip LLM analysis?
+    # Or refine it with LLM?
+    # Let's refine it if type is generic.
+    
+    err = state.get("current_error", {})
+    if err.get("type", "UNKNOWN") != "UNKNOWN" and err.get("file") and err.get("line"):
+         # We have good data from Regex
+         state["logs"].append(f"Regex Detected {err.get('type')} error in {err.get('file')} line {err.get('line')}")
+         return state
+
+    state["logs"].append("Analyzing failure logs with LLM...")
+    logs = err.get("raw_logs", "")
     analysis = bug_analyzer.analyze_logs(logs)
     state["current_error"].update(analysis)
-    state["logs"].append(f"Detected {analysis.get('type')} error in {analysis.get('file')} line {analysis.get('line')}")
+    state["logs"].append(f"LLM Detected {analysis.get('type')} error in {analysis.get('file')} line {analysis.get('line')}")
     return state
 
 def fix_node(state: AgentState):
     err = state["current_error"]
     file_rel = err.get("file")
     
+    if not file_rel:
+         state["logs"].append("Could not identify file to fix.")
+         state["iteration"] += 1
+         return state
+
     full_path = os.path.join(state["repo_path"], file_rel)
     if not os.path.exists(full_path):
-         state["logs"].append(f"File {file_rel} not found in workspace. Trying best guess...")
-         # Fallback logic could go here
+         state["logs"].append(f"File {file_rel} not found in workspace.")
          state["iteration"] += 1
          return state
          
     content = read_file_content(full_path)
-    fixed_content = fix_generator.generate_fix(content, err)
+    
+    # Pass language context if available
+    context_lang = state.get("language_detected", "Unknown")
+    
+    fixed_content = fix_generator.generate_fix(content, err) # Update signature to pass lang?
     
     if fixed_content == content:
-        state["logs"].append("LLM could not generate a unique fix.")
+        state["logs"].append("LLM could not generate a fix.")
     else:
-        # Apply fix LOCALLY
         fix_generator.apply_fix_to_repo(state["repo_path"], file_rel, fixed_content)
         
         fix_record = {
             "file": file_rel,
-            "bug_type": err.get("type"),
-            "line_number": err.get("line"),
-            "commit_message": f"[AI-AGENT] Fix {err.get('type')} error in {file_rel} line {err.get('line')}",
+            "bug_type": err.get("type", "General"),
+            "line_number": err.get("line", 0),
+            "commit_message": f"[AI-AGENT] Fix {err.get('type', 'General')} error in {file_rel} line {err.get('line', 0)}",
             "status": "Applied" 
         }
         state["fixes_applied"].append(fix_record)
@@ -129,12 +174,18 @@ def commit_node(state: AgentState):
     last_fix = state["fixes_applied"][-1]
     msg = last_fix["commit_message"]
     
-    # Push changes to Remote so Docker can pull them next test_node run
-    res = github_service.commit_and_push(state["repo_path"], msg, state["branch_name"], state["token"])
+    res = github_service.commit_and_push(
+        state["repo_path"], 
+        msg, 
+        state["branch_name"], 
+        state.get("token"),
+        auth_mode=state.get("auth_mode", "https"),
+        private_key=state.get("private_key")
+    )
     
     if res["status"] == "success":
         last_fix["status"] = "Fixed"
-        state["logs"].append("Committed and Synced changes to Remote Sandbox.")
+        state["logs"].append("Committed and Synced changes.")
     else:
         last_fix["status"] = "Failed Commit"
         state["logs"].append(f"Commit/Push failed: {res['message']}")
@@ -145,11 +196,9 @@ def commit_node(state: AgentState):
 def pr_node(state: AgentState):
     state["logs"].append("Creating Pull Request...")
     title = f"AI Fixes for {state['team_name']}"
-    body = f"Autonomous fixes generated by RIFT Agent.\n\nStats:\n- Iterations: {state['iteration']}\n- Fixes: {len(state['fixes_applied'])}"
+    body = f"Autonomous fixes generated by RIFT Agent.\n\nStats:\n- Language: {state.get('language_detected', 'Unknown')}\n- Iterations: {state['iteration']}\n- Fixes: {len(state['fixes_applied'])}"
     
-    # Only create PR if we actually did something or if passed?
-    # RIFT requirement: "Create Pull Request automatically"
-    res = github_service.create_pr(state["repo_url"], state["branch_name"], state["token"], title, body)
+    res = github_service.create_pr(state["repo_url"], state["branch_name"], state.get("token"), title, body)
     
     if res["status"] == "success":
         state["logs"].append(f"PR Created: {res['url']}")
@@ -158,21 +207,13 @@ def pr_node(state: AgentState):
         
     return state
 
-# Conditional Logic
+# Flow Logic
 def check_retry(state: AgentState):
-    if state["test_status"] == "PASSED":
-        return "create_pr"
-    
-    if state["test_status"] == "ERROR":
-        # Docker failed entirely? Stop?
-        return "create_pr"
-        
-    if state["iteration"] >= state["max_iterations"]:
-        return "create_pr"
-        
+    if state["test_status"] == "PASSED": return "create_pr"
+    if state["test_status"] == "ERROR": return "create_pr"
+    if state["iteration"] >= state["max_iterations"]: return "create_pr"
     return "analyze"
 
-# Graph
 workflow = StateGraph(AgentState)
 
 workflow.add_node("clone", clone_node)

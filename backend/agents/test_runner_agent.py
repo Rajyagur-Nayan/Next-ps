@@ -1,23 +1,26 @@
 from typing import Dict
 from backend.docker_manager import DockerManager
+from backend.config import Config
 
 class TestRunnerAgent:
     def __init__(self):
         self.docker_manager = DockerManager()
-        
-    def run_tests(self, repo_url: str, branch_name: str, token: str) -> Dict:
+
+    def run_tests(self, repo_url: str, branch_name: str, token: str, auth_mode: str = "https", private_key: str = None) -> Dict[str, str]:
         """
-        Runs tests using Docker.
+        Orchestrates test execution in a sandbox.
         """
-        # We don't need repo_path here since DockerManager handles cloning inside the container
-        # But we might need a local path if we were mounting.
-        # DockerManager.run_tests_in_sandbox signature: repo_path, repo_url, branch_name, token
-        # Let's adjust usage to match DockerManager.
+        print(f"TestRunner: Starting tests for {repo_url} on branch {branch_name} (Auth: {auth_mode})")
         
-        # Actually in DockerManager we implemented:
-        # run_tests_in_sandbox(repo_path, repo_url, branch_name, token)
-        # But for "Sandbox Clone", we only need URL, Branch, Token.
-        # repo_path was unused in DockerManager implementation for cloning-inside strategy.
+        # We delegate the heavy lifting to DockerManager
+        # Now passing auth_mode and private_key
+        result = self.docker_manager.run_tests_in_sandbox(
+            
+            repo_url=repo_url,
+            branch_name=branch_name,
+            token=token,
+            auth_mode=auth_mode,
+            private_key=private_key
+        )
         
-        results = self.docker_manager.run_tests_in_sandbox(None, repo_url, branch_name, token)
-        return results
+        return result

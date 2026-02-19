@@ -1,8 +1,11 @@
+
 import docker
 import os
 import shutil
 import time
-from typing import Dict, Tuple
+import json
+import base64
+from typing import Dict
 
 class DockerManager:
     def __init__(self):
@@ -12,55 +15,96 @@ class DockerManager:
             print(f"Docker Error: {e}")
             self.client = None
 
-    def run_tests_in_sandbox(self, repo_path: str, repo_url: str, branch_name: str, token: str) -> Dict[str, str]:
+    def build_sandbox_image(self):
         """
-        Runs tests in a Docker container.
+        Builds the universal sandbox image if not present.
+        """
+        if not self.client: return False
+        
+        try:
+            print("Building Universal Sandbox Image (this may take time)...")
+            # Point to backend/sandbox.Dockerfile
+            dockerfile_path = os.path.join(os.path.dirname(__file__), "sandbox.Dockerfile")
+            self.client.images.build(
+                path=os.path.dirname(__file__),
+                dockerfile="sandbox.Dockerfile",
+                tag="rift-sandbox:latest"
+            )
+            print("Sandbox Image Built Successfully.")
+            return True
+        except Exception as e:
+            print(f"Build Failed: {e}")
+            return False
+
+    def run_tests_in_sandbox(self, repo_url: str, branch_name: str, token: str, auth_mode: str = "https", private_key: str = None) -> Dict:
+        """
+        Runs tests in a Docker container using Universal Runner.
         """
         if not self.client:
-            return {"status": "ERROR", "logs": "Docker not available. Please ensure Docker Desktop is running."}
+            return {"status": "ERROR", "logs": "Docker not available."}
 
-        # Dynamic Language Support: Use image with both Python and Node
-        # Image: nikolaik/python-nodejs:python3.9-nodejs20 (A standard image with both)
-        # If not available locally, it will pull (might take time first run).
-        # Fallback: python:3.9 and install node? Takes too long.
-        # Let's use `nikolaik/python-nodejs:python3.9-nodejs20`
-        image_name = "nikolaik/python-nodejs:python3.9-nodejs20"
-        
+        # Check for image
+        try:
+            self.client.images.get("rift-sandbox:latest")
+        except docker.errors.ImageNotFound:
+            if not self.build_sandbox_image():
+                return {"status": "ERROR", "logs": "Failed to build sandbox image."}
+
         container = None
         try:
             clean_url = repo_url.replace("https://", "")
-            if token:
-                 auth_url = f"https://{token}@{clean_url}"
-            else:
-                 auth_url = repo_url
             
-            # Script to detect and run
-            # We clone, then check files.
+            # 1. Prepare Clone Command
+            clone_cmd = ""
+            pre_config = ""
             
+            if auth_mode == "https":
+                if token:
+                     auth_url = f"https://{token}@{clean_url}"
+                else:
+                     auth_url = repo_url
+                clone_cmd = f"git clone {auth_url} /app/repo"
+                
+            elif auth_mode == "ssh":
+                if not private_key:
+                     return {"status": "ERROR", "logs": "Private Key missing for SSH mode."}
+                     
+                b64_key = base64.b64encode(private_key.encode('utf-8')).decode('utf-8')
+                
+                pre_config = f"""
+                mkdir -p /root/.ssh && \
+                echo '{b64_key}' | base64 -d > /root/.ssh/id_rsa && \
+                chmod 600 /root/.ssh/id_rsa && \
+                ssh-keyscan github.com >> /root/.ssh/known_hosts && \
+                """
+                
+                ssh_url = repo_url
+                if "https://" in repo_url:
+                     ssh_url = repo_url.replace("https://github.com/", "git@github.com:")
+                
+                clone_cmd = f"git clone {ssh_url} /app/repo"
+
+            # 2. Inject Universal Runner Script
+            # Read script content
+            runner_path = os.path.join(os.path.dirname(__file__), "scripts", "universal_runner.py")
+            with open(runner_path, "r") as f:
+                runner_content = f.read()
+            
+            b64_runner = base64.b64encode(runner_content.encode('utf-8')).decode('utf-8')
+
+            # 3. Execution Script
             script = f"""
-            git clone {auth_url} /app/repo && \
+            {pre_config}
+            {clone_cmd} && \
             cd /app/repo && \
             git checkout {branch_name} || git checkout -b {branch_name} && \
-            if [ -f "requirements.txt" ]; then \
-                echo "Detected Python Project" && \
-                pip install -r requirements.txt && \
-                (pytest > test_logs.txt 2>&1 || true); \
-            elif [ -f "package.json" ]; then \
-                echo "Detected Node.js Project" && \
-                npm install && \
-                (npm test > test_logs.txt 2>&1 || true); \
-            else \
-                echo "No standard test config found (requirements.txt or package.json)" > test_logs.txt; \
-            fi && \
-            cat test_logs.txt
+            echo '{b64_runner}' | base64 -d > /app/universal_runner.py && \
+            python3 /app/universal_runner.py && \
+            rm -rf /root/.ssh/id_rsa
             """
             
-            # Need git installed. The nikolaik image usually has git.
-            # Just to be safe, try apt-get update if git missing?
-            # Or just run.
-            
             container = self.client.containers.run(
-                image_name,
+                "rift-sandbox:latest",
                 command=f"bash -c '{script}'",
                 detach=True,
                 remove=False
@@ -68,23 +112,34 @@ class DockerManager:
             
             exit_code = container.wait()
             logs = container.logs().decode("utf-8")
-            
             container.remove()
+
+            # 4. Parse JSON Output
+            # The runner outputs JSON at the end, but logs might contain other stuff.
+            # Look for the last line or JSON block.
+            try:
+                # Find start of JSON
+                json_start = logs.rfind('{')
+                if json_start != -1:
+                    json_str = logs[json_start:]
+                    result = json.loads(json_str)
+                    
+                    # Add raw logs if missing or just keep full logs
+                    if "raw_logs" not in result or not result["raw_logs"]:
+                         result["raw_logs"] = logs
+                    
+                    # Mask Token
+                    if token:
+                        result["raw_logs"] = result["raw_logs"].replace(token, "***TOKEN***")
+                        
+                    return result
+            except:
+                pass
             
-            status = "PASSED"
-            if "failed" in logs.lower() or "error" in logs.lower():
-                 if " 1 failed" in logs or " errors" in logs or "failing" in logs:
-                     status = "FAILED"
-            
-            safe_logs = logs.replace(token, "***TOKEN***")
-            
-            return {"status": status, "logs": safe_logs}
+            return {"status": "ERROR", "logs": logs}
             
         except Exception as e:
             if container:
-                try: 
-                    container.kill() 
-                    container.remove()
+                try: container.kill(); container.remove()
                 except: pass
-            
-            return {"status": "ERROR", "logs": f"Sandbox Error: {str(e)}"}
+            return {"status": "ERROR", "logs": str(e)}

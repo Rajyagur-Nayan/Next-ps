@@ -15,6 +15,8 @@ import {
   Hammer,
   AlertTriangle,
   Loader2,
+  Lock,
+  Key,
 } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
@@ -27,6 +29,7 @@ const StatusBadge = ({ status }: { status: string }) => {
     FAILED: "bg-red-900/50 text-red-400 border-red-700",
     PENDING: "bg-yellow-900/50 text-yellow-400 border-yellow-700",
     RUNNING: "bg-blue-900/50 text-blue-400 border-blue-700 animate-pulse",
+    ERROR: "bg-red-900/50 text-red-400 border-red-700",
   };
   const s = status as keyof typeof styles;
   return (
@@ -39,12 +42,14 @@ const StatusBadge = ({ status }: { status: string }) => {
 };
 
 export default function Dashboard() {
-  // State
+  const [authMode, setAuthMode] = useState<"https" | "ssh">("https");
+
   const [formData, setFormData] = useState({
     repo_url: "",
     team_name: "",
     leader_name: "",
     github_token: "",
+    private_key: "",
   });
 
   const [status, setStatus] = useState<any>({
@@ -58,11 +63,11 @@ export default function Dashboard() {
     fixes_applied: [],
     total_failures: 0,
     branch_name: "---",
+    auth_mode: "https",
   });
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Polling
   useEffect(() => {
     const poll = async () => {
       try {
@@ -77,17 +82,32 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  // Scroll logs
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [status.logs]);
 
   const handleRun = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Validation
+    if (authMode === "https" && !formData.github_token) {
+      alert("Please enter a GitHub Token for HTTPS mode.");
+      return;
+    }
+    if (authMode === "ssh" && !formData.private_key) {
+      alert("Please enter a Private Key for SSH mode.");
+      return;
+    }
+
     try {
-      await axios.post(`${API_URL}/start-autonomous-run`, formData);
-    } catch (err) {
-      alert("Failed to start agent. Check console.");
+      await axios.post(`${API_URL}/start-autonomous-run`, {
+        ...formData,
+        auth_mode: authMode,
+      });
+    } catch (err: any) {
+      alert(
+        "Failed to start agent: " + (err.response?.data?.detail || err.message),
+      );
     }
   };
 
@@ -106,7 +126,7 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-4 text-sm text-slate-400">
             <span className="flex items-center gap-1">
-              <Terminal size={14} /> v2.0.0 (Production)
+              <Terminal size={14} /> v2.1.0 (SSH Supported)
             </span>
           </div>
         </div>
@@ -117,19 +137,46 @@ export default function Dashboard() {
         <div className="lg:col-span-4 space-y-6">
           {/* Input Panel */}
           <div className="bg-[#1e293b] rounded-xl border border-slate-700 shadow-xl overflow-hidden">
-            <div className="p-4 border-b border-slate-700 bg-slate-800/50 flex items-center gap-2">
-              <Activity className="text-blue-400" size={18} />
-              <h2 className="font-semibold text-slate-100">Configuration</h2>
+            <div className="p-4 border-b border-slate-700 bg-slate-800/50 flex items-center gap-2 justify-between">
+              <div className="flex items-center gap-2">
+                <Activity className="text-blue-400" size={18} />
+                <h2 className="font-semibold text-slate-100">Configuration</h2>
+              </div>
+
+              {/* Auth Mode Toggle */}
+              <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("https")}
+                  disabled={isRunning}
+                  className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-1 transition-all ${authMode === "https" ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
+                >
+                  <Lock size={10} /> HTTPS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("ssh")}
+                  disabled={isRunning}
+                  className={`px-3 py-1 rounded text-xs font-bold flex items-center gap-1 transition-all ${authMode === "ssh" ? "bg-purple-600 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
+                >
+                  <Key size={10} /> SSH
+                </button>
+              </div>
             </div>
+
             <div className="p-6">
               <form onSubmit={handleRun} className="space-y-4">
                 <div>
                   <label className="text-xs font-mono text-slate-400 uppercase">
-                    Repository URL
+                    Repository URL {authMode === "ssh" ? "(SSH)" : "(HTTPS)"}
                   </label>
                   <input
-                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm focus:border-blue-500 outline-none transition-colors"
-                    placeholder="https://github.com/owner/repo"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm focus:border-blue-500 outline-none transition-colors font-mono"
+                    placeholder={
+                      authMode === "ssh"
+                        ? "git@github.com:user/repo.git"
+                        : "https://github.com/user/repo"
+                    }
                     value={formData.repo_url}
                     onChange={(e) =>
                       setFormData({ ...formData, repo_url: e.target.value })
@@ -173,27 +220,91 @@ export default function Dashboard() {
                     />
                   </div>
                 </div>
-                <div>
-                  <label className="text-xs font-mono text-slate-400 uppercase">
-                    GitHub Token (Secure)
-                  </label>
-                  <input
-                    type="password"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm focus:border-blue-500 outline-none"
-                    placeholder="github_pat_..."
-                    value={formData.github_token}
-                    onChange={(e) =>
-                      setFormData({ ...formData, github_token: e.target.value })
-                    }
-                    disabled={isRunning}
-                    required
-                  />
-                </div>
+
+                {/* Dynamic Auth Fields */}
+                {authMode === "https" ? (
+                  <div className="animate-in fade-in slide-in-from-top-2 duration-300">
+                    <label className="text-xs font-mono text-slate-400 uppercase flex items-center gap-1">
+                      <Lock size={10} /> GitHub Token
+                    </label>
+                    <input
+                      type="password"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm focus:border-blue-500 outline-none"
+                      placeholder="github_pat_..."
+                      value={formData.github_token}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          github_token: e.target.value,
+                        })
+                      }
+                      disabled={isRunning}
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                    <div>
+                      <label className="text-xs font-mono text-slate-400 uppercase flex items-center gap-1">
+                        <Key size={10} /> Private Key (PEM/OpenSSH)
+                      </label>
+                      <textarea
+                        className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-xs font-mono focus:border-purple-500 outline-none h-24 resize-none"
+                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
+                        value={formData.private_key}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            private_key: e.target.value,
+                          })
+                        }
+                        disabled={isRunning}
+                      />
+                    </div>
+                    <div className="p-2 bg-yellow-900/20 border border-yellow-800/50 rounded flex gap-2 items-start">
+                      <AlertTriangle
+                        size={14}
+                        className="text-yellow-500 mt-0.5 shrink-0"
+                      />
+                      <p className="text-[10px] text-yellow-400/80">
+                        SSH Mode Note: PR creation still requires a GitHub
+                        Token. Automatic PRs might be skipped if token is not
+                        provided separately (not implemented yet). Brach pushes
+                        will work fine.
+                      </p>
+                      {/* Ideally prompt for optional token in SSH mode too, but following strict prompt layout */}
+                    </div>
+
+                    {/* Adding Optional Token input for SSH mode PRs as per logical requirement, even if minimal prompt */}
+                    <div>
+                      <label className="text-xs font-mono text-slate-400 uppercase flex items-center gap-1">
+                        <Lock size={10} /> GitHub Token (Optional for PRs)
+                      </label>
+                      <input
+                        type="password"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm focus:border-purple-500 outline-none"
+                        placeholder="github_pat_..."
+                        value={formData.github_token}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            github_token: e.target.value,
+                          })
+                        }
+                        disabled={isRunning}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <button
                   type="submit"
                   disabled={isRunning}
-                  className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-3 rounded-lg shadow-lg flex justify-center items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4"
+                  className={`w-full font-bold py-3 rounded-lg shadow-lg flex justify-center items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4 text-white
+                    ${
+                      authMode === "https"
+                        ? "bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500"
+                        : "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500"
+                    }`}
                 >
                   {isRunning ? (
                     <Loader2 className="animate-spin" />
@@ -233,12 +344,6 @@ export default function Dashboard() {
                     {parseInt(status.time_taken) < 5 ? "+10" : "0"}
                   </span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-slate-400">
-                    Commit Penalty ({">"} 20)
-                  </span>
-                  <span className="font-mono text-red-400">0</span>
-                </div>
               </div>
             </div>
           </div>
@@ -265,11 +370,15 @@ export default function Dashboard() {
 
             <div className="bg-[#1e293b] p-4 rounded-xl border border-slate-700 flex flex-col justify-between">
               <div className="flex items-center gap-2 text-slate-400 mb-2">
-                <AlertTriangle size={16} />{" "}
-                <span className="text-xs uppercase">Failures</span>
+                {status.auth_mode === "ssh" ? (
+                  <Key size={16} />
+                ) : (
+                  <Lock size={16} />
+                )}
+                <span className="text-xs uppercase">Auth Mode</span>
               </div>
-              <div className="text-2xl font-bold text-white">
-                {status.total_failures}
+              <div className="text-xl font-bold text-white uppercase">
+                {status.auth_mode || "HTTPS"}
               </div>
             </div>
 
@@ -304,11 +413,10 @@ export default function Dashboard() {
               <StatusBadge status={status.final_status} />
             </div>
 
-            {/* Visual Progress/Timeline */}
             <div className="relative pt-2 pb-6">
               <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-blue-500 transition-all duration-500 ease-out"
+                  className={`h-full transition-all duration-500 ease-out ${status.auth_mode === "ssh" ? "bg-purple-500" : "bg-blue-500"}`}
                   style={{
                     width: `${(status.iteration / status.max_iterations) * 100}%`,
                   }}

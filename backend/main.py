@@ -21,7 +21,9 @@ class AutonomousRunRequest(BaseModel):
     repo_url: str
     team_name: str
     leader_name: str
-    github_token: str
+    github_token: str = None # Optional if SSH
+    auth_mode: str = "https" # or "ssh"
+    private_key: str = None # Required if SSH
 
 # Session State for Dashboard
 session_state = {
@@ -36,7 +38,8 @@ session_state = {
     "final_status": "PENDING",
     "time_taken": "0s",
     "score": 100,
-    "start_time": 0
+    "start_time": 0,
+    "auth_mode": "https"
 }
 
 def run_autonomous_agent(req: AutonomousRunRequest):
@@ -48,12 +51,15 @@ def run_autonomous_agent(req: AutonomousRunRequest):
     session_state["iteration"] = 0
     session_state["final_status"] = "PENDING"
     session_state["start_time"] = time.time()
+    session_state["auth_mode"] = req.auth_mode
     
     initial_state = {
         "repo_url": req.repo_url,
         "team_name": req.team_name,
         "leader_name": req.leader_name,
         "token": req.github_token,
+        "auth_mode": req.auth_mode,
+        "private_key": req.private_key,
         "workspace": "",
         "repo_path": "",
         "branch_name": "",
@@ -65,9 +71,22 @@ def run_autonomous_agent(req: AutonomousRunRequest):
         "current_error": {}
     }
     
+    final_state = initial_state
+    
     try:
-        # Run LangGraph
-        final_state = autonomous_app.invoke(initial_state)
+        # Run LangGraph with Streaming for Live Updates
+        for event in autonomous_app.stream(initial_state):
+            for key, value in event.items():
+                # Update local tracker of state
+                final_state.update(value)
+                
+                # Update Session State for Dashboard
+                if "iteration" in value:
+                     session_state["iteration"] = value["iteration"]
+                if "logs" in value:
+                     session_state["logs"] = value["logs"]
+                if "fixes_applied" in value:
+                     session_state["fixes_applied"] = value["fixes_applied"]
         
         # Calculate Stats
         end_time = time.time()
@@ -81,25 +100,41 @@ def run_autonomous_agent(req: AutonomousRunRequest):
         if duration < 300: # Bonus if < 5 mins
             base_score += 10
         
-        # Penalty for extra commits (iterations)
         commits_made = len(final_state.get("fixes_applied", []))
-        if commits_made > 20: # Example logic from prompt "penalty per commit over 20"
+        if commits_made > 20: 
              base_score -= (commits_made - 20) * 2
         
         status = "PASSED" if final_state.get("test_status") == "PASSED" else "FAILED"
+        if final_state.get("test_status") == "ERROR":
+            status = "ERROR"
+            
+        # Active Error details
+        active_error = None
+        if status != "PASSED":
+             err = final_state.get("current_error", {})
+             if err and err.get("message"):
+                 active_error = {
+                     "file": err.get("file", "unknown"),
+                     "line": err.get("line", 0),
+                     "type": err.get("type", "General"),
+                     "message": err.get("message", "Unknown Error")
+                 }
         
         # strict results.json format
         results = {
             "repo_url": req.repo_url,
             "branch": final_state.get("branch_name", "unknown"),
-            "total_failures": len(final_state.get("fixes_applied", [])), # Approximation
+            "auth_mode": req.auth_mode,
+            "language_detected": final_state.get("language_detected", "Unknown"),
+            "total_failures": len(final_state.get("fixes_applied", [])), 
             "fixes_applied": len(final_state.get("fixes_applied", [])),
             "iterations_used": final_state.get("iteration", 0),
             "max_iterations": 5,
             "status": status,
             "time_taken": time_str,
             "score": base_score,
-            "fixes": final_state.get("fixes_applied", [])
+            "fixes": final_state.get("fixes_applied", []),
+            "active_error": active_error
         }
         
         # Update Session State
